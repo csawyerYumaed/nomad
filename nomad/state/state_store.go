@@ -847,6 +847,9 @@ func (s *StateStore) UpsertAllocs(index uint64, allocs []*structs.Allocation) er
 		}
 
 		exist, _ := existing.(*structs.Allocation)
+		if err := s.updateSummaryWithAlloc(alloc, exist, txn); err != nil {
+			return fmt.Errorf("updating job summary failed: %v", err)
+		}
 		if exist == nil {
 			alloc.CreateIndex = index
 			alloc.ModifyIndex = index
@@ -860,10 +863,6 @@ func (s *StateStore) UpsertAllocs(index uint64, allocs []*structs.Allocation) er
 		}
 		if err := txn.Insert("allocs", alloc); err != nil {
 			return fmt.Errorf("alloc insert failed: %v", err)
-		}
-
-		if err := s.updateSummaryWithAlloc(alloc, exist, txn); err != nil {
-			return fmt.Errorf("updating job summary failed: %v", err)
 		}
 
 		// If the allocation is running, force the job to running status.
@@ -1205,12 +1204,8 @@ func (s *StateStore) updateSummaryWithJob(job *structs.Job, txn *memdb.Txn) erro
 				Starting: 0,
 			}
 			existing.Summary[tg.Name] = newSummary
-		} else {
-			if summary.Queued > tg.Count {
-				summary.Queued = tg.Count
-			} else {
-				summary.Queued += tg.Count - (summary.Total())
-			}
+		} else if summary.Queued > tg.Count {
+			summary.Queued = tg.Count
 			existing.Summary[tg.Name] = summary
 		}
 	}
@@ -1282,6 +1277,21 @@ func (s *StateStore) updateSummaryWithAlloc(newAlloc *structs.Allocation,
 			tgSummary.Starting -= 1
 		case structs.AllocClientStatusComplete:
 			tgSummary.Complete -= 1
+		}
+	} else if existingAlloc.DesiredStatus != newAlloc.DesiredStatus {
+		shouldDecrementStarting := false
+		switch newAlloc.DesiredStatus {
+		case structs.AllocDesiredStatusFailed:
+			tgSummary.Failed += 1
+			shouldDecrementStarting = true
+		case structs.AllocDesiredStatusStop:
+			tgSummary.Complete += 1
+			shouldDecrementStarting = true
+		}
+		if shouldDecrementStarting {
+			if newAlloc.ClientStatus == structs.AllocClientStatusPending {
+				tgSummary.Starting -= 1
+			}
 		}
 	}
 
